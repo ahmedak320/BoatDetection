@@ -132,12 +132,29 @@ class LidarPublisher(Node):
 
     def publish_scan(self, scan):
         try:
+            # Extract the first timestamp from the scan (in nanoseconds)
+            timestamp_ns = scan.timestamp[0]  # Use the first timestamp in the array
+
+            # Convert the timestamp from nanoseconds to seconds and nanoseconds for ROS
+            timestamp_sec = int(timestamp_ns // 1_000_000_000)  # Seconds as integer
+            timestamp_nsec = int(timestamp_ns % 1_000_000_000)  # Nanoseconds as integer
+
+            # Calculate dt (time difference) from the previous scan
+            if hasattr(self, 'previous_timestamp'):
+                dt = (timestamp_ns - self.previous_timestamp) / 1e9  # Convert nanoseconds to seconds
+                self.previous_timestamp = timestamp_ns
+            else:
+                dt = 0.1  # Fallback to a default time step if it's the first scan
+                self.previous_timestamp = timestamp_ns
+
+            # Process the XYZ data from the point cloud
             xyz = self.xyz_lut(scan)
             xyz = xyz.reshape(-1, 3)
 
             # Create PointCloud2 message
             msg = PointCloud2()
-            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.stamp.sec = timestamp_sec  # Set seconds part of the timestamp (integer)
+            msg.header.stamp.nanosec = timestamp_nsec  # Set nanoseconds part of the timestamp (integer)
             msg.header.frame_id = 'lidar_frame'
             msg.height = 1
             msg.width = xyz.shape[0]
@@ -152,10 +169,16 @@ class LidarPublisher(Node):
             msg.is_dense = True
             msg.data = xyz.astype(np.float32).tobytes()
 
+            # Publish the point cloud data with the correct timestamp
             self.publisher_.publish(msg)
             self.get_logger().info(f'Publishing pointcloud, frame_id: {scan.frame_id}, index: {self.current_scan_index}')
+
+            # Log the dt to verify the time difference
+            self.get_logger().info(f'Time difference (dt) between scans: {dt:.6f} seconds')
+
         except Exception as e:
             self.get_logger().error(f'Error publishing scan: {e}')
+
 
     def publish_speed_and_orientation(self):
         try:
@@ -165,7 +188,7 @@ class LidarPublisher(Node):
 
             # Simulate speed change
             # self.current_speed += self.speed_increment * dt  # m/s
-            self.current_speed = 2.5 # m/s
+            self.current_speed = 0.0 # m/s
 
             # Simulate yaw change
             # self.current_yaw += self.yaw_rate * dt  # radians

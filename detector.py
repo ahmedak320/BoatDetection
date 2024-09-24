@@ -174,30 +174,40 @@ class BoatDetector(Node):
         """
         Calculate the relative speed of detected boats with respect to the boat with LiDAR.
         """
+        if dt <= 0:
+            return 0.0  # Cannot calculate speed with non-positive time difference
+
         # Calculate the velocity of the boat with LiDAR
         boat_vx, boat_vy = self.calculate_boat_velocity(boat_speed, boat_yaw)
-        
+
         # Estimate the velocity of the detected boat (dx/dt, dy/dt)
         detected_vx = (detected_boat_position[0] - previous_detected_boat_position[0]) / dt
         detected_vy = (detected_boat_position[1] - previous_detected_boat_position[1]) / dt
-        
+
         # Calculate the relative velocity components
         relative_vx = detected_vx - boat_vx
         relative_vy = detected_vy - boat_vy
-        
+
         # Calculate the relative speed (magnitude of the relative velocity vector)
-        relative_speed = np.sqrt(relative_vx**2 + relative_vy**2)
+        relative_speed = np.sqrt(relative_vx ** 2 + relative_vy ** 2)
         return relative_speed
 
 
     def listener_callback(self, msg):
         if not self.running:
             return
+
+        # Extract timestamp from PointCloud2 message
+        timestamp_sec = msg.header.stamp.sec
+        timestamp_nanosec = msg.header.stamp.nanosec
+        current_timestamp = timestamp_sec + timestamp_nanosec / 1e9  # Convert to float seconds
+
         points = self.pointcloud2_to_array(msg)
         filtered_points = self.filter_points(points)
         boats = self.detect_boats(filtered_points)
-        self.update_tracks(boats)
+        self.update_tracks(boats, current_timestamp)
         self.visualize(filtered_points)
+
 
     def pointcloud2_to_array(self, cloud_msg):
         cloud_arr = np.frombuffer(cloud_msg.data, dtype=np.float32)
@@ -530,8 +540,7 @@ class BoatDetector(Node):
 
         return merged
 
-    def update_tracks(self, detected_boats):
-        current_time = time.time()
+    def update_tracks(self, detected_boats, current_timestamp):
         updated_boats = {}
 
         # Predict new positions for all existing tracks
@@ -551,25 +560,31 @@ class BoatDetector(Node):
                 distance = np.linalg.norm(centroid - predicted_pos)
 
                 if distance < self.tracking_threshold:
-                    # Update existing track
-                    kf.update(centroid)
-                    updated_boats[boat_id] = {
-                        'kf': kf,
-                        'last_seen': current_time,
-                        'points': detected_boat['points']
-                    }
+                    # Calculate dt using timestamps
+                    previous_timestamp = boat_info.get('timestamp', current_timestamp)
+                    dt = current_timestamp - previous_timestamp
 
-                    # Log the boat's position (centroid)
-                    self.get_logger().info(f"Boat {boat_id} tracked at position: {centroid[0]:.2f}, {centroid[1]:.2f}")
+                    if dt > 0:
+                        # Update existing track
+                        kf.update(centroid)
+                        updated_boats[boat_id] = {
+                            'kf': kf,
+                            'timestamp': current_timestamp,
+                            'last_seen': current_timestamp,
+                            'points': detected_boat['points'],
+                            'previous_position': boat_info.get('current_position', centroid),
+                            'current_position': centroid,
+                        }
 
-                    # Calculate the relative speed
-                    dt = current_time - boat_info['last_seen']
-                    if dt > 0:  # Avoid division by zero in velocity calculation
+                        # Log the boat's position (centroid)
+                        self.get_logger().info(f"Boat {boat_id} tracked at position: {centroid[0]:.2f}, {centroid[1]:.2f}")
+
+                        # Calculate the relative speed
                         relative_speed = self.calculate_relative_speed(
-                            self.current_speed.x,  # Boat's speed (x-component from speed listener)
-                            self.current_yaw,  # Boat's yaw
+                            self.current_speed.x if self.current_speed else 0.0,  # Boat's speed (x-component)
+                            self.current_yaw if self.current_yaw is not None else 0.0,  # Boat's yaw
                             centroid,  # Current position of detected boat
-                            predicted_pos,  # Previous position from Kalman filter
+                            boat_info.get('current_position', centroid),  # Previous position
                             dt
                         )
 
@@ -589,8 +604,11 @@ class BoatDetector(Node):
             kf = self.create_kalman_filter(detection['centroid'])
             updated_boats[new_id] = {
                 'kf': kf,
-                'last_seen': current_time,
-                'points': detection['points']
+                'timestamp': current_timestamp,
+                'last_seen': current_timestamp,
+                'points': detection['points'],
+                'previous_position': detection['centroid'],
+                'current_position': detection['centroid'],
             }
 
             # Log the new boat detection
@@ -599,14 +617,10 @@ class BoatDetector(Node):
         # Handle disappearing tracks (boats that are no longer detected)
         for boat_id, boat_info in self.tracked_boats.items():
             if boat_id not in updated_boats:
-                time_since_last_seen = current_time - boat_info['last_seen']
+                time_since_last_seen = current_timestamp - boat_info['last_seen']
                 if time_since_last_seen < self.max_disappeared_time:
                     # Retain the track for a while
-                    updated_boats[boat_id] = {
-                        'kf': boat_info['kf'],
-                        'last_seen': boat_info['last_seen'],
-                        'points': boat_info.get('points', np.empty((0, 3)))
-                    }
+                    updated_boats[boat_id] = boat_info
                 else:
                     self.get_logger().info(f"Boat {boat_id} lost")
 

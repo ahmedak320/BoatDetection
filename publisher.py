@@ -1,6 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
+from geometry_msgs.msg import TwistStamped, QuaternionStamped
 from ouster.sdk import open_source, client, pcap
 import numpy as np
 import threading
@@ -9,20 +10,21 @@ import select
 import termios
 import tty
 import time
+import math
 
 class LidarPublisher(Node):
     def __init__(self):
         super().__init__('lidar_publisher')
         self.publisher_ = self.create_publisher(PointCloud2, 'lidar_pointcloud', 10)
-        self.timer = self.create_timer(0.1, self.publish_pointcloud)  # 10Hz publish rate
+        self.speed_publisher = self.create_publisher(TwistStamped, 'boat_speed', 10)
+        self.orientation_publisher = self.create_publisher(QuaternionStamped, 'boat_orientation', 10)
+        self.timer = self.create_timer(0.1, self.publish_data)  # 10Hz publish rate
 
         # Choose source of lidar data
         self.RECORDING = True
         if self.RECORDING:
             pcap_path = '/home/ahmed/Desktop/new_pc_code/Ouster_Data/boatpassing.pcap'
             metadata_path = '/home/ahmed/Desktop/new_pc_code/Ouster_Data/boatpassing.json'
-            # pcap_path = '/home/ahmed/Desktop/new_pc_code/Ouster_Data/festivalcity.pcap'
-            # metadata_path = '/home/ahmed/Desktop/new_pc_code/Ouster_Data/festivalcity.json'
             with open(metadata_path, 'r') as f:
                 info = client.SensorInfo(f.read())
             self.source = pcap.Pcap(pcap_path, info)
@@ -49,6 +51,14 @@ class LidarPublisher(Node):
         # Save terminal settings to restore later
         self.orig_settings = termios.tcgetattr(sys.stdin)
 
+        # Simulation variables for speed and orientation
+        self.start_time = time.time()
+        self.last_publish_time = self.start_time
+        self.current_speed = 0.0  # meters per second
+        self.current_yaw = 0.0    # radians
+        self.speed_increment = 0.1  # m/s per second
+        self.yaw_rate = 0.01       # radians per second
+
     def input_listener(self):
         tty.setcbreak(sys.stdin)
         try:
@@ -72,7 +82,7 @@ class LidarPublisher(Node):
         finally:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.orig_settings)
 
-    def publish_pointcloud(self):
+    def publish_data(self):
         if self.paused:
             if self.step_forward:
                 self.step_forward = False
@@ -80,9 +90,13 @@ class LidarPublisher(Node):
             elif self.step_backward:
                 self.step_backward = False
                 self.go_back_frame()
+            else:
+                # Still publish speed and orientation when paused
+                self.publish_speed_and_orientation()
             return
         else:
             self.advance_frame()
+            self.publish_speed_and_orientation()
 
     def advance_frame(self):
         try:
@@ -142,6 +156,58 @@ class LidarPublisher(Node):
             self.get_logger().info(f'Publishing pointcloud, frame_id: {scan.frame_id}, index: {self.current_scan_index}')
         except Exception as e:
             self.get_logger().error(f'Error publishing scan: {e}')
+
+    def publish_speed_and_orientation(self):
+        try:
+            current_time = time.time()
+            dt = current_time - self.last_publish_time
+            self.last_publish_time = current_time
+
+            # Simulate speed change
+            # self.current_speed += self.speed_increment * dt  # m/s
+            self.current_speed = 2.5 # m/s
+
+            # Simulate yaw change
+            # self.current_yaw += self.yaw_rate * dt  # radians
+            self.current_yaw = 0.0 # radians
+
+            # Normalize yaw to [-pi, pi]
+            self.current_yaw = (self.current_yaw + math.pi) % (2 * math.pi) - math.pi
+
+            # Publish speed
+            speed_msg = TwistStamped()
+            speed_msg.header.stamp = self.get_clock().now().to_msg()
+            speed_msg.header.frame_id = 'lidar_frame'
+            speed_msg.twist.linear.x = self.current_speed * math.cos(self.current_yaw)
+            speed_msg.twist.linear.y = self.current_speed * math.sin(self.current_yaw)
+            speed_msg.twist.linear.z = 0.0
+            speed_msg.twist.angular.x = 0.0
+            speed_msg.twist.angular.y = 0.0
+            speed_msg.twist.angular.z = self.yaw_rate
+
+            self.speed_publisher.publish(speed_msg)
+
+            # Publish orientation
+            orientation_msg = QuaternionStamped()
+            orientation_msg.header.stamp = self.get_clock().now().to_msg()
+            orientation_msg.header.frame_id = 'lidar_frame'
+            quaternion = self.yaw_to_quaternion(self.current_yaw)
+            orientation_msg.quaternion = quaternion
+
+            self.orientation_publisher.publish(orientation_msg)
+
+            self.get_logger().info(f'Publishing speed: {self.current_speed:.2f} m/s, yaw: {self.current_yaw:.2f} rad')
+
+        except Exception as e:
+            self.get_logger().error(f'Error publishing speed and orientation: {e}')
+
+    def yaw_to_quaternion(self, yaw):
+        """Converts a yaw angle (in radians) to a quaternion."""
+        quaternion = QuaternionStamped().quaternion
+        quaternion.z = math.sin(yaw / 2.0)
+        quaternion.w = math.cos(yaw / 2.0)
+        return quaternion
+
 
     def destroy_node(self):
         # Restore terminal settings

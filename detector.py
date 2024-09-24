@@ -540,6 +540,24 @@ class BoatDetector(Node):
 
         return merged
 
+    def smooth_speed(self, boat_id, new_speed, window_size=5):
+        if 'speed_history' not in self.tracked_boats[boat_id]:
+            self.tracked_boats[boat_id]['speed_history'] = []
+
+        # Add new speed to the history and keep only the last N values
+        self.tracked_boats[boat_id]['speed_history'].append(new_speed)
+        if len(self.tracked_boats[boat_id]['speed_history']) > window_size:
+            self.tracked_boats[boat_id]['speed_history'].pop(0)
+
+        # Return the smoothed (averaged) speed
+        if(len(self.tracked_boats[boat_id]['speed_history']) == window_size):
+            smoothed_speed = np.mean(self.tracked_boats[boat_id]['speed_history'])
+        else:
+            smoothed_speed = new_speed
+
+        return smoothed_speed
+
+
     def update_tracks(self, detected_boats, current_timestamp):
         updated_boats = {}
 
@@ -574,22 +592,26 @@ class BoatDetector(Node):
                             'points': detected_boat['points'],
                             'previous_position': boat_info.get('current_position', centroid),
                             'current_position': centroid,
+                            'speed_history': boat_info.get('speed_history', []),
                         }
 
-                        # Log the boat's position (centroid)
-                        self.get_logger().info(f"Boat {boat_id} tracked at position: {centroid[0]:.2f}, {centroid[1]:.2f}")
-
-                        # Calculate the relative speed
+                        # Calculate relative speed and store it
                         relative_speed = self.calculate_relative_speed(
-                            self.current_speed.x if self.current_speed else 0.0,  # Boat's speed (x-component)
-                            self.current_yaw if self.current_yaw is not None else 0.0,  # Boat's yaw
-                            centroid,  # Current position of detected boat
-                            boat_info.get('current_position', centroid),  # Previous position
+                            self.current_speed.x if self.current_speed else 0.0,
+                            self.current_yaw if self.current_yaw is not None else 0.0,
+                            centroid,
+                            boat_info.get('current_position', centroid),
                             dt
                         )
 
-                        # Log the relative speed
-                        self.get_logger().info(f"Boat {boat_id}: Relative Speed = {relative_speed:.2f} m/s")
+                        # Smooth the speed
+                        smoothed_speed = self.smooth_speed(boat_id, relative_speed)
+
+                        # Store the speed in the boat info
+                        updated_boats[boat_id]['speed'] = smoothed_speed
+
+                        # Log the boat's position and speed (for debugging)
+                        self.get_logger().info(f"Boat {boat_id}: Speed = {smoothed_speed:.2f} m/s at position {centroid}")
 
                     matched = True
                     break
@@ -609,6 +631,7 @@ class BoatDetector(Node):
                 'points': detection['points'],
                 'previous_position': detection['centroid'],
                 'current_position': detection['centroid'],
+                'speed': 0.0,  # New boats have no speed yet
             }
 
             # Log the new boat detection
@@ -625,7 +648,6 @@ class BoatDetector(Node):
                     self.get_logger().info(f"Boat {boat_id} lost")
 
         self.tracked_boats = updated_boats
-
 
 
     def process_clusters(self, points, labels):
@@ -670,6 +692,7 @@ class BoatDetector(Node):
             boats.append({'points': boat_points, 'centroid': centroid})
         return boats
 
+
     def visualize(self, points):
         self.ax.clear()
 
@@ -678,7 +701,7 @@ class BoatDetector(Node):
         
         # Color ALL points based on clamped altitude (Z-coordinate) and keep color scale constant
         sc = self.ax.scatter(points[:, 0], points[:, 1], c=z_values, s=1, cmap='viridis', vmin=0, vmax=100, label='Point Cloud')
-        
+
         # Ensuring a proper colorbar is drawn for altitude with a fixed range
         if not hasattr(self, 'colorbar') or self.colorbar is None:
             self.colorbar = plt.colorbar(sc, ax=self.ax, label='Altitude (meters)')
@@ -703,8 +726,13 @@ class BoatDetector(Node):
 
             # Mark the predicted position
             self.ax.plot(predicted_position[0], predicted_position[1], 'ro', markersize=8)  # Red dot at the predicted position
-            self.ax.text(predicted_position[0], predicted_position[1], f'ID {boat_id}', color='red', fontweight='bold', 
-                         ha='center', va='bottom')  # Removed the bbox parameter
+
+            # Retrieve the stored speed
+            relative_speed = boat_info.get('speed', 0.0)
+            speed_text = f'ID {boat_id}\nSpeed: {relative_speed:.2f} m/s'
+
+            # Display the boat ID and speed next to the predicted position
+            self.ax.text(predicted_position[0], predicted_position[1], speed_text, color='red', fontweight='bold', ha='center', va='bottom')
 
         # Re-apply axis settings
         self.ax.set_xlim(-150, 150)
@@ -716,8 +744,10 @@ class BoatDetector(Node):
         self.ax.grid(True)
         self.ax.legend(loc='upper right')
 
+        # Redraw the plot
         plt.draw()
         plt.pause(0.001)  # This allows for continuous updating in a loop
+
 
     def destroy_node(self):
         plt.close(self.fig)

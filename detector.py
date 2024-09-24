@@ -141,12 +141,12 @@ class BoatDetector(Node):
     def speed_callback(self, msg):
         """Callback function for receiving speed updates."""
         self.current_speed = msg.twist.linear
-        self.get_logger().info(f"Received speed in x,y: {self.current_speed.x:.2f} m/s, {self.current_speed.y:.2f} m/s")
+        # self.get_logger().info(f"Received speed in x,y: {self.current_speed.x:.2f} m/s, {self.current_speed.y:.2f} m/s")
 
     def orientation_callback(self, msg):
         """Callback function for receiving orientation updates."""
         self.current_yaw = self.quaternion_to_yaw(msg.quaternion)
-        self.get_logger().info(f"Received yaw: {self.current_yaw:.2f} (radians)")
+        # self.get_logger().info(f"Received yaw: {self.current_yaw:.2f} (radians)")
 
     def quaternion_to_yaw(self, quaternion):
         """
@@ -161,6 +161,33 @@ class BoatDetector(Node):
         yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
         return yaw
+
+    def calculate_boat_velocity(self, speed, yaw):
+        """
+        Convert the boat's speed and yaw to X and Y velocity components.
+        """
+        vx = speed * np.cos(yaw)  # Velocity in the X direction
+        vy = speed * np.sin(yaw)  # Velocity in the Y direction
+        return vx, vy
+
+    def calculate_relative_speed(self, boat_speed, boat_yaw, detected_boat_position, previous_detected_boat_position, dt):
+        """
+        Calculate the relative speed of detected boats with respect to the boat with LiDAR.
+        """
+        # Calculate the velocity of the boat with LiDAR
+        boat_vx, boat_vy = self.calculate_boat_velocity(boat_speed, boat_yaw)
+        
+        # Estimate the velocity of the detected boat (dx/dt, dy/dt)
+        detected_vx = (detected_boat_position[0] - previous_detected_boat_position[0]) / dt
+        detected_vy = (detected_boat_position[1] - previous_detected_boat_position[1]) / dt
+        
+        # Calculate the relative velocity components
+        relative_vx = detected_vx - boat_vx
+        relative_vy = detected_vy - boat_vy
+        
+        # Calculate the relative speed (magnitude of the relative velocity vector)
+        relative_speed = np.sqrt(relative_vx**2 + relative_vy**2)
+        return relative_speed
 
 
     def listener_callback(self, msg):
@@ -531,8 +558,25 @@ class BoatDetector(Node):
                         'last_seen': current_time,
                         'points': detected_boat['points']
                     }
+
+                    # Log the boat's position (centroid)
+                    self.get_logger().info(f"Boat {boat_id} tracked at position: {centroid[0]:.2f}, {centroid[1]:.2f}")
+
+                    # Calculate the relative speed
+                    dt = current_time - boat_info['last_seen']
+                    if dt > 0:  # Avoid division by zero in velocity calculation
+                        relative_speed = self.calculate_relative_speed(
+                            self.current_speed.x,  # Boat's speed (x-component from speed listener)
+                            self.current_yaw,  # Boat's yaw
+                            centroid,  # Current position of detected boat
+                            predicted_pos,  # Previous position from Kalman filter
+                            dt
+                        )
+
+                        # Log the relative speed
+                        self.get_logger().info(f"Boat {boat_id}: Relative Speed = {relative_speed:.2f} m/s")
+
                     matched = True
-                    print(f"Boat {boat_id} updated at coordinates: {centroid}")
                     break
 
             if not matched:
@@ -548,9 +592,11 @@ class BoatDetector(Node):
                 'last_seen': current_time,
                 'points': detection['points']
             }
-            print(f"New boat {new_id} detected at coordinates: {detection['centroid']}")
 
-        # Handle disappearing tracks
+            # Log the new boat detection
+            self.get_logger().info(f"New boat {new_id} detected at position: {detection['centroid'][0]:.2f}, {detection['centroid'][1]:.2f}")
+
+        # Handle disappearing tracks (boats that are no longer detected)
         for boat_id, boat_info in self.tracked_boats.items():
             if boat_id not in updated_boats:
                 time_since_last_seen = current_time - boat_info['last_seen']
@@ -562,9 +608,11 @@ class BoatDetector(Node):
                         'points': boat_info.get('points', np.empty((0, 3)))
                     }
                 else:
-                    print(f"Boat {boat_id} lost")
+                    self.get_logger().info(f"Boat {boat_id} lost")
 
         self.tracked_boats = updated_boats
+
+
 
     def process_clusters(self, points, labels):
         boats = []

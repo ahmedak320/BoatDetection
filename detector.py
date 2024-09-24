@@ -35,6 +35,7 @@ CV2: pip install opencv-python
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
+from geometry_msgs.msg import TwistStamped, QuaternionStamped
 import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')  # Set the backend
@@ -67,6 +68,23 @@ class BoatDetector(Node):
             self.listener_callback,
             10)
         
+        # Initialize subscriptions for speed and orientation
+        self.speed_subscription = self.create_subscription(
+            TwistStamped,
+            'boat_speed',
+            self.speed_callback,
+            10)
+
+        self.orientation_subscription = self.create_subscription(
+            QuaternionStamped,
+            'boat_orientation',
+            self.orientation_callback,
+            10)
+
+        # Variables to store the latest speed and orientation
+        self.current_speed = None
+        self.current_yaw = None
+
         # Initialize tracking variables
         self.next_boat_id = 1
         self.tracked_boats = {}  # boat_id: {'kf': KalmanFilter, 'last_seen': timestamp, 'points': np.array}
@@ -119,6 +137,31 @@ class BoatDetector(Node):
     def handle_close(self, event):
         self.running = False
         rclpy.shutdown()
+
+    def speed_callback(self, msg):
+        """Callback function for receiving speed updates."""
+        self.current_speed = msg.twist.linear
+        self.get_logger().info(f"Received speed in x,y: {self.current_speed.x:.2f} m/s, {self.current_speed.y:.2f} m/s")
+
+    def orientation_callback(self, msg):
+        """Callback function for receiving orientation updates."""
+        self.current_yaw = self.quaternion_to_yaw(msg.quaternion)
+        self.get_logger().info(f"Received yaw: {self.current_yaw:.2f} (radians)")
+
+    def quaternion_to_yaw(self, quaternion):
+        """
+        Converts a quaternion into yaw (rotation around the Z-axis in radians).
+        """
+        x = quaternion.x
+        y = quaternion.y
+        z = quaternion.z
+        w = quaternion.w
+
+        # Yaw calculation (around Z-axis)
+        yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+        return yaw
+
 
     def listener_callback(self, msg):
         if not self.running:

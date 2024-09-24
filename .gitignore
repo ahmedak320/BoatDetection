@@ -1,0 +1,2 @@
+# Ignore all pointcloud recording files
+*.pcap

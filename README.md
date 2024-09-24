@@ -184,5 +184,4 @@ Contributions are welcome! If you'd like to contribute to this project, please f
 
 **Disclaimer**: This system is intended for research and educational purposes. Use it responsibly and ensure compliance with all applicable laws and regulations when deploying in real-world scenarios.
 
-**Contact Information**: For questions or support, please open an issue on the GitHub repository or contact the project maintainer at email@example.com.
 

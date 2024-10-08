@@ -36,6 +36,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
 from geometry_msgs.msg import TwistStamped, QuaternionStamped
+from std_msgs.msg import Float32MultiArray  # Import for publishing IDs and coordinates
 import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')  # Set the backend
@@ -116,6 +117,13 @@ class BoatDetector(Node):
         # 4: Altitude-based Planar Clustering
         # 5: PCA-Based Shape Analysis
         self.DETECTION_METHOD = 0  # Change this value to select different methods
+
+        # Initialize the publisher for bounding boxes
+        self.bounding_box_publisher = self.create_publisher(
+            Float32MultiArray,  # Use Float32MultiArray to publish bounding box coordinates and IDs
+            'tracked_boats_bounding_boxes',
+            10
+        )
 
     def create_kalman_filter(self, initial_position):
         kf = KalmanFilter(dim_x=4, dim_z=2)
@@ -589,7 +597,8 @@ class BoatDetector(Node):
                             'kf': kf,
                             'timestamp': current_timestamp,
                             'last_seen': current_timestamp,
-                            'points': detected_boat['points'],
+                            # Store only the corner points of the bounding box
+                            'bounding_box': self.calculate_bounding_box(detected_boat['points']),
                             'previous_position': boat_info.get('current_position', centroid),
                             'current_position': centroid,
                             'speed_history': boat_info.get('speed_history', []),
@@ -613,6 +622,9 @@ class BoatDetector(Node):
                         # Log the boat's position and speed (for debugging)
                         self.get_logger().info(f"Boat {boat_id}: Speed = {smoothed_speed:.2f} m/s at position {centroid}")
 
+                        # Publish the bounding box information
+                        self.publish_bounding_boxes(updated_boats)
+
                     matched = True
                     break
 
@@ -628,7 +640,7 @@ class BoatDetector(Node):
                 'kf': kf,
                 'timestamp': current_timestamp,
                 'last_seen': current_timestamp,
-                'points': detection['points'],
+                'bounding_box': self.calculate_bounding_box(detection['points']),
                 'previous_position': detection['centroid'],
                 'current_position': detection['centroid'],
                 'speed': 0.0,  # New boats have no speed yet
@@ -649,6 +661,13 @@ class BoatDetector(Node):
 
         self.tracked_boats = updated_boats
 
+    def calculate_bounding_box(self, points):
+        """Calculate the corner points of the bounding box from the points."""
+        if points.size == 0:
+            return None
+        x_min, x_max = points[:, 0].min(), points[:, 0].max()
+        y_min, y_max = points[:, 1].min(), points[:, 1].max()
+        return np.array([[x_min, y_min], [x_max, y_min], [x_max, y_max], [x_min, y_max]])
 
     def process_clusters(self, points, labels):
         boats = []
@@ -711,13 +730,13 @@ class BoatDetector(Node):
         # Plot tracked boats
         for boat_id, boat_info in self.tracked_boats.items():
             kf = boat_info['kf']
-            boat_points = boat_info.get('points', np.empty((0, 3)))
+            bounding_box = boat_info.get('bounding_box', None)
             predicted_position = np.array([kf.x[0], kf.x[2]])
 
             # Plot boat bounding box if points are available
-            if boat_points.size > 0:
-                x_min, x_max = boat_points[:, 0].min(), boat_points[:, 0].max()
-                y_min, y_max = boat_points[:, 1].min(), boat_points[:, 1].max()
+            if bounding_box is not None:
+                x_min, y_min = bounding_box[0]
+                x_max, y_max = bounding_box[2]
                 width = x_max - x_min
                 height = y_max - y_min
                 rect = patches.Rectangle((x_min, y_min), width, height,
@@ -748,6 +767,17 @@ class BoatDetector(Node):
         plt.draw()
         plt.pause(0.001)  # This allows for continuous updating in a loop
 
+    def publish_bounding_boxes(self, updated_boats):
+        """Publish the bounding boxes of tracked boats."""
+        bounding_box_msg = Float32MultiArray()
+        for boat_id, boat_info in updated_boats.items():
+            bounding_box = boat_info['bounding_box']
+            if bounding_box is not None:
+                # Flatten the bounding box coordinates and append the boat ID
+                bounding_box_msg.data.extend([bounding_box[0][0], bounding_box[0][1], boat_id])
+        
+        # Publish the message
+        self.bounding_box_publisher.publish(bounding_box_msg)
 
     def destroy_node(self):
         plt.close(self.fig)
